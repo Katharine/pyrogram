@@ -297,6 +297,7 @@ class Client(Methods):
         self.last_update_time = datetime.now()
 
         self.loop = asyncio.get_event_loop()
+        self.session_cache: dict[int, Session] = {}
 
     def __enter__(self):
         return self.start()
@@ -862,31 +863,37 @@ class Client(Methods):
 
             dc_id = file_id.dc_id
 
-            session = Session(
-                self, dc_id,
-                await Auth(self, dc_id, await self.storage.test_mode()).create()
-                if dc_id != await self.storage.dc_id()
-                else await self.storage.auth_key(),
-                await self.storage.test_mode(),
-                is_media=True
-            )
+            session = self.session_cache.get(dc_id, None)
 
             try:
-                await session.start()
-
-                if dc_id != await self.storage.dc_id():
-                    exported_auth = await self.invoke(
-                        raw.functions.auth.ExportAuthorization(
-                            dc_id=dc_id
-                        )
+                if session is None:
+                    log.info("[{}] Creating new session for dc_id {}.".format(self.name, dc_id))
+                    session = Session(
+                        self, dc_id,
+                        await Auth(self, dc_id, await self.storage.test_mode()).create()
+                        if dc_id != await self.storage.dc_id()
+                        else await self.storage.auth_key(),
+                        await self.storage.test_mode(),
+                        is_media=True
                     )
+                    await session.start()
 
-                    await session.invoke(
-                        raw.functions.auth.ImportAuthorization(
-                            id=exported_auth.id,
-                            bytes=exported_auth.bytes
+                    if dc_id != await self.storage.dc_id():
+                        exported_auth = await self.invoke(
+                            raw.functions.auth.ExportAuthorization(
+                                dc_id=dc_id
+                            )
                         )
-                    )
+
+                        await session.invoke(
+                            raw.functions.auth.ImportAuthorization(
+                                id=exported_auth.id,
+                                bytes=exported_auth.bytes
+                            )
+                        )
+                    self.session_cache[dc_id] = session
+                else:
+                    log.info("[{}] Reusing session for dc_id {}.".format(self.name, dc_id))
 
                 r = await session.invoke(
                     raw.functions.upload.GetFile(
@@ -1019,8 +1026,6 @@ class Client(Methods):
                 raise
             except Exception as e:
                 log.exception(e)
-            finally:
-                await session.stop()
 
     def guess_mime_type(self, filename: str) -> Optional[str]:
         return self.mimetypes.guess_type(filename)[0]
